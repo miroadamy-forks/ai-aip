@@ -1,3 +1,15 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "requests",
+#     "anthropic",
+# ]
+# ///
+#
+# Run with:  uv run agent1-claude.py   (uv reads the metadata above and installs
+# deps into an isolated env). Also requires:  export ANTHROPIC_API_KEY=...
+
 # weather-agent with TAO — Anthropic (Claude Haiku) variant of agent1.py
 #
 # ─────────────────────────────────────────────────────────────────────────────
@@ -97,11 +109,16 @@ def get_weather(lat: float, lon: float) -> dict:
                 "low": daily["temperature_2m_min"][0],
                 "conditions": WEATHER_CODES.get(daily["weathercode"][0], "Unknown"),
             }
-        except (requests.Timeout, requests.ConnectionError) as e:
+        except (requests.Timeout, requests.ConnectionError):
             if attempt == max_retries - 1:
                 raise
             print(f"  ⚠️  Retry {attempt + 1}/{max_retries - 1} after timeout...")
             time.sleep(2)
+
+    # Unreachable: the final attempt always returns a dict or re-raises. The
+    # explicit raise makes every code path return-or-raise so the type checker
+    # (Pylance reportReturnType) doesn't see an implicit `return None`.
+    raise RuntimeError("get_weather: retries exhausted without a result")
 
 
 # ── 3. Tool registry ────────────────────────────────────────────────────────
@@ -224,9 +241,7 @@ def run(question: str) -> str:
                 break
         else:
             print("⚠️  AI response missing Action/Args format\n")
-            print(
-                f"Expected format:\nThought: ...\nAction: <tool_name>\nArgs: <json>\n"
-            )
+            print("Expected format:\nThought: ...\nAction: <tool_name>\nArgs: <json>\n")
             print(f"Got:\n{response[:200]}...\n")
             break
 

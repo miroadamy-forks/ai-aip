@@ -1,3 +1,17 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "requests",
+#     "langchain-ollama",
+# ]
+# ///
+#
+# Run with:  uv run agent1.py   (uv reads the metadata above and installs deps
+# into an isolated env). NOTE: also needs a local Ollama server running with the
+# model pulled — `ollama pull llama3.2` — which uv does NOT manage (it's not a
+# Python package).
+
 # weather-agent with TAO – AI-driven tool selection + interactive loop + full tracing
 #
 # ─────────────────────────────────────────────────────────────────────────────
@@ -106,7 +120,7 @@ def get_weather(lat: float, lon: float) -> dict:
                 # Translate the numeric weathercode into readable text.
                 "conditions": WEATHER_CODES.get(daily["weathercode"][0], "Unknown"),
             }
-        except (requests.Timeout, requests.ConnectionError) as e:
+        except (requests.Timeout, requests.ConnectionError):
             # On the LAST allowed attempt, give up and re-raise so the caller
             # can report the failure.
             if attempt == max_retries - 1:
@@ -116,6 +130,12 @@ def get_weather(lat: float, lon: float) -> dict:
             # prints attempt+1 out of (max_retries-1) remaining retries.
             print(f"  ⚠️  Retry {attempt + 1}/{max_retries - 1} after timeout...")
             time.sleep(2)  # Wait 2 seconds before retrying
+
+    # Unreachable in practice: the final attempt always returns a dict or
+    # re-raises. The explicit raise makes every code path return-or-raise, so the
+    # type checker (Pylance reportReturnType) no longer sees an implicit `return
+    # None` falling out of the bottom of the function.
+    raise RuntimeError("get_weather: retries exhausted without a result")
 
 
 # ── 3. Tool registry ────────────────────────────────────────────────────────
@@ -199,7 +219,10 @@ def run(question: str) -> str:
     for i in range(max_iterations):
         # ── Reason ── Ask the LLM for its next step given the transcript so far.
         reply = llm.invoke(messages)
-        response = reply.content.strip()
+        # ChatOllama returns a string here, but BaseMessage.content is typed
+        # str | list[...]; coerce to str so the type checker is satisfied and a
+        # stray non-str payload can't crash .strip().
+        response = str(reply.content).strip()
         print(response + "\n")  # trace: show the model's raw output
 
         # ── Done? ── If the model emitted a Final answer, extract the text after
@@ -262,9 +285,7 @@ def run(question: str) -> str:
             # Action/Args call — it broke the format contract. Show what we got
             # (truncated) and stop.
             print("⚠️  AI response missing Action/Args format\n")
-            print(
-                f"Expected format:\nThought: ...\nAction: <tool_name>\nArgs: <json>\n"
-            )
+            print("Expected format:\nThought: ...\nAction: <tool_name>\nArgs: <json>\n")
             print(f"Got:\n{response[:200]}...\n")
             break
 
