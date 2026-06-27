@@ -181,3 +181,79 @@ for production code, is the more reliable path.
 - Ollama Anthropic-compatible endpoint (`stop_reason: "tool_use"`):
   https://docs.ollama.com/api/anthropic-compatibility
 - Verified via Context7 on 2026-06-27.
+
+---
+
+## Q2. I type a city + country. Who converts that to latitude/longitude before it's sent to the tool?
+
+**Short answer:** The **LLM does it, from memory.** There is **no geocoding step** — no API, no lookup table, no library. The model recalls the coordinates from its training data and writes them straight into the `Args` line. `get_weather` only ever receives numbers.
+
+Confidence: **HIGH** (this is visible directly in the code and the run log).
+
+---
+
+### The trace, step by step
+
+1. You type `Valencia, Spain`.
+2. The REPL wraps it: `query = "What is the predicted weather today for Valencia, Spain?"` — still just text, no coordinates.
+3. That text goes to the LLM. The model **invents the coordinates itself** in its reasoning step. From the run log:
+
+   ```
+   Thought: I need to get weather for Valencia at coordinates 39.4673, 0.3832
+   Action: get_weather
+   Args: {"lat": 39.4673, "lon": 0.3832}
+   ```
+
+   The "39.4673, 0.3832" came out of the model's weights — nothing in the program computed it.
+4. Only **now** does Python get involved: `run()` parses that `Args` JSON and calls `get_weather(lat=39.4673, lon=0.3832)`.
+
+So the geocoding "tool" is the language model's own world knowledge. The tool signature makes this explicit — it accepts coordinates, never a name:
+
+```python
+def get_weather(lat: float, lon: float) -> dict:   # numbers in, never "Valencia"
+```
+
+This is the same division of labour as Q1: the LLM **decides** (here, *which coordinates*), Python **executes** (the HTTP call). The difference is that for the weather data we deliberately don't trust the model (we fetch it live), but for the **coordinates we do** — silently.
+
+---
+
+### Why this matters — it's a real reliability hole
+
+Using the LLM as a geocoder means the coordinates are a **plausible guess**, not a lookup. They can be subtly or badly wrong, and the program has no way to notice:
+
+- **Concrete example from the run log:** Valencia, Spain is actually at about **39.47° N, 0.38° _W_** → longitude **−0.38**. The model emitted `"lon": 0.3832` — **positive** (east), which is a point in the Mediterranean Sea offshore, not the city. Open-Meteo still returned a plausible-looking forecast (26.9 / 25.6, Partly cloudy) because the wrong point is close enough that the weather is similar — so the bug is **invisible**: no error, just a quietly-wrong location.
+- Ambiguous names ("Springfield", "Tripoli", duplicate city names across countries) are exactly where a from-memory guess is most likely to land in the wrong country.
+- Smaller towns and non-English place names degrade further.
+
+The model is acting as a confident geocoder with no error bars — and CRITICAL RULE #2 ("NEVER hallucinate tool results") doesn't help, because the coordinates are part of the **tool _input_**, not the tool _output_.
+
+---
+
+### The fix: make geocoding a real tool (or a real step)
+
+**Option A — add a geocoding tool** and let the agent call it first (a genuine two-step TAO: geocode → get_weather). Open-Meteo offers a free geocoding endpoint:
+
+```python
+def geocode(name: str) -> dict:
+    """Resolve a place name to coordinates via Open-Meteo's geocoding API."""
+    r = requests.get(
+        "https://geocoding-api.open-meteo.com/v1/search",
+        params={"name": name, "count": 1},
+        timeout=15,
+    )
+    r.raise_for_status()
+    hit = r.json()["results"][0]
+    return {"lat": hit["latitude"], "lon": hit["longitude"], "name": hit["name"]}
+
+TOOLS = {"geocode": geocode, "get_weather": get_weather}
+```
+
+Then teach the model in the system prompt to call `geocode` before `get_weather`. Now the coordinates come from a real database, and the agent loop shows two Action/Observation rounds instead of one.
+
+**Option B — resolve in Python before the agent runs.** Call `geocode(loc)` in the interactive loop and hand the coordinates to the agent, so the LLM never guesses them at all. Simpler, but the agent no longer "decides" the location — fine if you only care about reliability.
+
+**Bottom line:** today, *the model* is your geocoder, invisibly, on every query. For anything beyond a demo, replace that guess with a real geocoding lookup (Option A keeps it agentic; Option B keeps it simple).
+
+#### Sources
+- Open-Meteo Geocoding API: https://open-meteo.com/en/docs/geocoding-api
+- Behaviour read directly from `agent1.py` and its run log (no external verification needed).
